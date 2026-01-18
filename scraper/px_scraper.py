@@ -43,12 +43,13 @@ class ProteomeXchangeScraper:
             await self.playwright.stop()
         logger.info("浏览器已关闭")
 
-    async def search_datasets(self, keyword: str) -> List[Dict]:
+    async def search_datasets(self, keyword: str, max_datasets: int = None) -> List[Dict]:
         """
-        搜索数据集
+        搜索数据集（支持多页）
 
         Args:
             keyword: 搜索关键词
+            max_datasets: 最大数据集数量（None 表示全部）
 
         Returns:
             数据集列表
@@ -56,72 +57,94 @@ class ProteomeXchangeScraper:
         if not self.browser:
             await self.start()
 
-        # 构建搜索 URL
-        url = f"https://proteomecentral.proteomexchange.org/ui?view=datasets&search={keyword}"
-
         logger.info(f"搜索关键词: {keyword}")
-        logger.info(f"访问 URL: {url}")
 
-        page = await self.browser.new_page()
+        all_datasets = []
+        page_num = 1
 
-        try:
-            # 访问搜索页面
-            await page.goto(url, timeout=self.timeout, wait_until="networkidle")
+        while True:
+            # 构建搜索 URL（带分页）
+            if page_num == 1:
+                url = f"https://proteomecentral.proteomexchange.org/ui?view=datasets&search={keyword}"
+            else:
+                url = f"https://proteomecentral.proteomexchange.org/ui?view=datasets&pageNumber={page_num}&search={keyword}"
 
-            # 等待数据加载
-            await page.wait_for_timeout(3000)  # 额外等待 3 秒确保数据加载
+            logger.info(f"访问第 {page_num} 页: {url}")
 
-            # 获取页面内容
-            content = await page.content()
+            page = await self.browser.new_page()
 
-            # 查找所有数据集链接
-            # 使用 JavaScript 查找包含 pxid 的链接
-            datasets = await page.evaluate('''() => {
-                const results = [];
-                const links = document.querySelectorAll('a');
+            try:
+                # 访问搜索页面
+                await page.goto(url, timeout=self.timeout, wait_until="networkidle")
 
-                links.forEach(link => {
-                    const href = link.getAttribute('href');
-                    if (href && href.includes('?pxid=')) {
-                        // 提取 pxid
-                        const match = href.match(/[?&]pxid=([^&]+)/);
-                        if (match) {
-                            const pxid = match[1];
+                # 等待数据加载
+                await page.wait_for_timeout(3000)  # 额外等待 3 秒确保数据加载
 
-                            // 查找链接文本或其他信息
-                            const text = link.textContent.trim();
+                # 查找当前页的所有数据集链接
+                datasets = await page.evaluate('''() => {
+                    const results = [];
+                    const links = document.querySelectorAll('a');
 
-                            results.push({
-                                'pxid': pxid,
-                                'link_text': text,
-                                'href': href
-                            });
+                    links.forEach(link => {
+                        const href = link.getAttribute('href');
+                        if (href && href.includes('?pxid=')) {
+                            // 提取 pxid
+                            const match = href.match(/[?&]pxid=([^&]+)/);
+                            if (match) {
+                                const pxid = match[1];
+
+                                // 查找链接文本或其他信息
+                                const text = link.textContent.trim();
+
+                                results.push({
+                                    'pxid': pxid,
+                                    'link_text': text,
+                                    'href': href
+                                });
+                            }
                         }
-                    }
-                });
+                    });
 
-                return results;
-            }''')
+                    return results;
+                }''')
 
-            logger.info(f"找到 {len(datasets)} 个数据集")
+                logger.info(f"第 {page_num} 页找到 {len(datasets)} 个数据集")
 
-            # 去重
-            seen = set()
-            unique_datasets = []
-            for ds in datasets:
-                if ds['pxid'] not in seen:
-                    seen.add(ds['pxid'])
-                    unique_datasets.append(ds)
+                # 如果当前页没有数据，说明已经到最后一页
+                if not datasets:
+                    logger.info(f"第 {page_num} 页没有数据，停止翻页")
+                    await page.close()
+                    break
 
-            logger.info(f"去重后: {len(unique_datasets)} 个数据集")
+                # 去重后添加到总列表
+                for ds in datasets:
+                    if ds['pxid'] not in {d['pxid'] for d in all_datasets}:
+                        all_datasets.append(ds)
 
-            await page.close()
-            return unique_datasets
+                logger.info(f"累计找到 {len(all_datasets)} 个数据集")
 
-        except Exception as e:
-            logger.error(f"搜索失败: {e}")
-            await page.close()
-            return []
+                await page.close()
+
+                # 检查是否达到最大数量限制
+                if max_datasets and len(all_datasets) >= max_datasets:
+                    logger.info(f"已达到最大数量限制 {max_datasets}")
+                    all_datasets = all_datasets[:max_datasets]
+                    break
+
+                # 如果当前页数据少于 100 个，说明已是最后一页
+                if len(datasets) < 100:
+                    logger.info(f"第 {page_num} 页数据量 < 100，已是最后一页")
+                    break
+
+                page_num += 1
+
+            except Exception as e:
+                logger.error(f"搜索第 {page_num} 页失败: {e}")
+                await page.close()
+                break
+
+        logger.info(f"翻页完成，共找到 {len(all_datasets)} 个数据集")
+        return all_datasets
 
     async def get_dataset_details(self, pxid: str) -> Optional[Dict]:
         """
@@ -205,7 +228,7 @@ class ProteomeXchangeScraper:
 
     async def scrape_all(self, keyword: str, max_datasets: int = None) -> List[Dict]:
         """
-        爬取搜索关键词对应的所有数据集及其详情
+        爬取搜索关键词对应的所有数据集及其详情（支持多页）
 
         Args:
             keyword: 搜索关键词
@@ -214,16 +237,12 @@ class ProteomeXchangeScraper:
         Returns:
             所有数据集的详细信息列表
         """
-        # 搜索数据集
-        datasets = await self.search_datasets(keyword)
+        # 搜索数据集（带分页支持）
+        datasets = await self.search_datasets(keyword, max_datasets=max_datasets)
 
         if not datasets:
             logger.warning("没有找到数据集")
             return []
-
-        # 限制数量
-        if max_datasets:
-            datasets = datasets[:max_datasets]
 
         logger.info(f"开始爬取 {len(datasets)} 个数据集的详细信息")
 

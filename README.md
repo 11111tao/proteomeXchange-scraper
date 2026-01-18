@@ -1,33 +1,36 @@
-# ProteomeXchange 数据集爬虫
+# ProteomeXchange 深度爬虫
 
-一个用于从 [ProteomeXchange](https://www.proteomexchange.org/) 网站爬取蛋白质组学数据集信息的 Python 爬虫工具。
+一个用于从 [ProteomeXchange](https://www.proteomexchange.org/) 深度爬取蛋白质组学数据集信息的 Python 工具，支持统计 PRIDE、MassIVE、iProX 等仓库的 RAW 原始文件数量和大小。
 
 ## 功能特性
 
-- 🔍 根据关键词搜索 ProteomeXchange 数据集
-- 📊 自动提取 8 个核心字段信息
-- 🔗 生成包含可点击元数据链接的 Excel 文件
-- ⚡ 使用 Playwright 处理动态页面
-- 🎯 支持批量爬取，自动去重
+- 🔍 **关键词搜索** - 根据关键词搜索 ProteomeXchange 数据集，支持多页自动翻页
+- 📊 **深度抓取** - 统计 RAW 原始文件（.raw, .d, .zip 等）的数量和总大小
+- 🗂️ **多仓库支持** - 支持 PRIDE、MassIVE、iProX、JPOST 等主流仓库
+- ⚡ **多线程加速** - 可配置并发线程数，大幅提升统计速度
+- 📈 **进度显示** - 实时进度条，清晰展示爬取进度
+- 🔗 **Excel 导出** - 自动生成格式化的 Excel 表格，包含可点击的元数据链接
+- 🔄 **自动重试** - 内置请求重试机制，提高稳定性
 
 ## 提取的字段
 
-每个数据集提取以下 8 个字段（按顺序）：
+每个数据集提取以下字段（按顺序）：
 
-1. **样品编号** (PXD****) - 数据集唯一标识符
-2. **Title** - 数据集标题
-3. **lab head** - 实验室负责人信息
-4. **Description** - 研究描述
-5. **Instrument List** - 使用仪器列表
-6. **submitter keyword** - 提交者关键词
-7. **Hosting Repository** - 托管仓库（如 PRIDE）
-8. **元数据网址** - 可直接点击跳转到元数据页面
+| 基础信息 | 文件统计 | 链接 |
+|---------|---------|-----|
+| 样品编号 (PXD***) | Raw_File_Count | 元数据网址 |
+| Title | Total_Raw_Size_GB | |
+| lab head | | |
+| Description | | |
+| Instrument List | | |
+| submitter keyword | | |
+| Hosting Repository | | |
 
 ## 安装
 
 ### 前置要求
 
-- Python 3.7 或更高版本
+- Python 3.8 或更高版本
 - pip 包管理器
 
 ### 安装依赖
@@ -47,20 +50,27 @@ python -m playwright install chromium
 ### 基本用法
 
 ```bash
-python main.py --keyword "你的关键词" --output "输出文件名.xlsx"
-```
+# 搜索关键词并统计 RAW 文件
+python main.py --keyword "top-down"
 
-### 示例
-
-```bash
-# 搜索关键词 "proteoform"
-python main.py --keyword "proteoform" --output "proteoform.xlsx"
-
-# 搜索多个关键词
-python main.py --keyword "top down" --output "top_down.xlsx"
+# 指定输出文件名
+python main.py --keyword "cancer" --output "cancer_data.xlsx"
 
 # 限制爬取数量（用于测试）
-python main.py --keyword "cancer" --max-datasets 10 --output "cancer_10.xlsx"
+python main.py --keyword "intact protein" --max-datasets 10
+```
+
+### 高级参数
+
+```bash
+# 快速模式（跳过 RAW 文件统计）
+python main.py --keyword "proteomics" --skip-raw-count
+
+# 指定线程数（默认 5，范围 1-20）
+python main.py --keyword "phosphorylation" --workers 10
+
+# 显示浏览器窗口（调试用）
+python main.py --keyword "glycoproteomics" --show-browser
 ```
 
 ### 参数说明
@@ -70,15 +80,29 @@ python main.py --keyword "cancer" --max-datasets 10 --output "cancer_10.xlsx"
 | `--keyword` | `-k` | 搜索关键词 | ✅ | - |
 | `--output` | `-o` | 输出 Excel 文件名 | ❌ | `proteomexchange_data.xlsx` |
 | `--max-datasets` | `-m` | 最大爬取数据集数量 | ❌ | 全部 |
-| `--headless` | - | 无头模式运行（不显示浏览器） | ❌ | True |
-| `--show-browser` | - | 显示浏览器窗口（用于调试） | ❌ | False |
+| `--workers` | `-w` | RAW 文件统计线程数 | ❌ | 5 |
+| `--skip-raw-count` | - | 跳过 RAW 文件统计（快速模式） | ❌ | False |
+| `--show-browser` | - | 显示浏览器窗口（调试用） | ❌ | False |
 
-## 输出文件
+## 线程数建议
 
-爬取完成后，Excel 文件会保存在 `data/` 目录下，包含：
-- 8 列数据，按指定顺序排列
-- 自动格式化的表格（列宽自适应、标题行加粗）
-- 最后一列的元数据网址可直接点击跳转
+| 线程数 | 适用场景 |
+|-------|---------|
+| 1 | 最稳定，最慢 |
+| 3-5 | 默认推荐，平衡速度和稳定性 |
+| 5-10 | 国内网络，较快 |
+| 10-20 | 海外服务器/良好网络 |
+
+> 注意：线程过多可能触发网站限流，建议不超过 20
+
+## 输出示例
+
+Excel 文件保存在 `data/` 目录下：
+
+| 样品编号 | Title | lab head | Hosting Repository | Raw_File_Count | Total_Raw_Size_GB | 元数据网址 |
+|---------|-------|----------|-------------------|----------------|------------------|-----------|
+| PXD000001 | Sample title | Dr. Name | PRIDE | 150 | 25.68 | [点击] |
+| PXD000002 | Another study | Dr. Smith | MassIVE | 80 | 12.34 | [点击] |
 
 ## 项目结构
 
@@ -91,7 +115,8 @@ scrap_tdp/
 ├── .gitignore            # Git 忽略文件
 ├── scraper/              # 爬虫模块
 │   ├── __init__.py
-│   └── px_scraper.py     # ProteomeXchange 爬虫
+│   ├── px_scraper.py     # ProteomeXchange 搜索爬虫
+│   └── raw_file_counter.py  # RAW 文件统计模块
 ├── utils/                # 工具模块
 │   ├── __init__.py
 │   └── excel_writer.py   # Excel 写入工具
@@ -101,35 +126,44 @@ scrap_tdp/
 
 ## 技术栈
 
-- **Playwright** - 用于处理动态加载的网页
+- **Playwright** - 处理动态加载的网页
+- **requests + urllib3** - HTTP 请求和重试机制
 - **pandas** - 数据处理
 - **openpyxl** - Excel 文件生成和格式化
-- **BeautifulSoup4** - HTML 解析（备用）
+- **tqdm** - 进度条显示
+- **concurrent.futures** - 多线程并发
 
-## 注意事项
+## 支持的仓库
 
-1. **爬取速度**：每个数据集约需 6-7 秒（包含页面加载和数据提取）
-2. **网络要求**：需要能够访问 ProteomeXchange 网站
-3. **资源占用**：Playwright 会启动 Chromium 浏览器，占用一定内存
-4. **合理使用**：建议控制爬取频率，遵守网站使用条款
+| 仓库 | API 支持 | 统计方式 |
+|------|---------|---------|
+| PRIDE | ✅ | `fileCategory=RAW` 过滤 |
+| MassIVE | ✅ | 文件后缀过滤 |
+| iProX | ✅ | 文件列表 API |
+| JPOST | ⚠️ | XML Fallback |
+| 其他 | ⚠️ | XML Fallback |
 
 ## 常见问题
 
-### Q: 提示 "Permission denied" 错误？
-A: Excel 文件可能已被打开，请关闭文件后重试。
+### Q: 爬取需要多长时间？
+A: 取决于数据集数量和线程数。假设每个数据集 API 响应时间 0.5 秒：
+- 100 个数据集，5 线程：约 10 秒
+- 100 个数据集，单线程：约 50 秒
 
-### Q: 如何只爬取少量数据测试？
-A: 使用 `--max-datasets` 参数限制数量，如：`--max-datasets 5`
+### Q: Raw_File_Count 为 0 是什么意思？
+A: 可能原因：
+1. 该数据集没有上传原始文件
+2. 仓库 API 暂不支持该数据集
+3. 网络请求失败（查看日志）
 
-### Q: 爬取过程中可以中断吗？
-A: 可以，按 `Ctrl+C` 即可安全中断程序。
+### Q: 如何只爬取不统计文件？
+A: 使用 `--skip-raw-count` 参数，只获取基础信息。
 
 ### Q: 元数据链接打不开？
-A: 确保网络可以访问 ProteomeXchange 网站，某些地区可能需要科学上网。
+A: 确保网络可以访问 ProteomeXchange 网站。
 
-## 开发者
-
-本项目基于 Python 开发，使用 Playwright 处理动态网页内容。
+### Q: 如何查看详细日志？
+A: 日志保存在 `scraper.log` 文件中。
 
 ## 许可证
 
@@ -139,7 +173,8 @@ A: 确保网络可以访问 ProteomeXchange 网站，某些地区可能需要科
 
 - [ProteomeXchange 官网](https://www.proteomexchange.org/)
 - [ProteomeCentral](https://proteomecentral.proteomexchange.org/)
-- [Playwright 文档](https://playwright.dev/python/)
+- [PRIDE API 文档](https://www.ebi.ac.uk/pride/ws/archive/v2/)
+- [MassIVE API](https://massive.ucsd.edu/ProteoSAFe/static/proteosafe.jsp)
 
 ---
 
