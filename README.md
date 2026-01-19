@@ -1,12 +1,12 @@
 # ProteomeXchange 深度爬虫
 
-一个用于从 [ProteomeXchange](https://www.proteomexchange.org/) 深度爬取蛋白质组学数据集信息的 Python 工具，支持统计 PRIDE、MassIVE、iProX 等仓库的 RAW 原始文件数量和大小。
+一个用于从 [ProteomeXchange](https://www.proteomexchange.org/) 深度爬取蛋白质组学数据集信息的 Python 工具，支持统计各仓库的 RAW 原始文件数量。
 
 ## 功能特性
 
 - 🔍 **关键词搜索** - 根据关键词搜索 ProteomeXchange 数据集，支持多页自动翻页
-- 📊 **深度抓取** - 统计 RAW 原始文件（.raw, .d, .zip 等）的数量和总大小
-- 🗂️ **多仓库支持** - 支持 PRIDE、MassIVE、iProX、JPOST 等主流仓库
+- 📊 **RAW 文件统计** - 统计原始文件（.raw、.d、.d.zip 等）的数量
+- 🗂️ **多仓库支持** - 支持 PRIDE、MassIVE、JPOST、iProX 等主流仓库
 - ⚡ **多线程加速** - 可配置并发线程数，大幅提升统计速度
 - 📈 **进度显示** - 实时进度条，清晰展示爬取进度
 - 🔗 **Excel 导出** - 自动生成格式化的 Excel 表格，包含可点击的元数据链接
@@ -14,17 +14,25 @@
 
 ## 提取的字段
 
-每个数据集提取以下字段（按顺序）：
-
 | 基础信息 | 文件统计 | 链接 |
 |---------|---------|-----|
 | 样品编号 (PXD***) | Raw_File_Count | 元数据网址 |
-| Title | Total_Raw_Size_GB | |
+| Title | | |
 | lab head | | |
 | Description | | |
 | Instrument List | | |
 | submitter keyword | | |
 | Hosting Repository | | |
+
+## 支持的原始文件格式
+
+| 扩展名 | 仪器类型 |
+|-------|---------|
+| `.raw` | Thermo 仪器 |
+| `.raw.zip`, `.raw.gz` | Thermo 仪器（压缩） |
+| `.d` | TOF/Brucker 仪器 |
+| `.d.zip`, `.d.gz` | TOF/Brucker 仪器（压缩） |
+| `.wiff`, `.wiff2` | AB Sciex 仪器 |
 
 ## 安装
 
@@ -99,10 +107,10 @@ python main.py --keyword "glycoproteomics" --show-browser
 
 Excel 文件保存在 `data/` 目录下：
 
-| 样品编号 | Title | lab head | Hosting Repository | Raw_File_Count | Total_Raw_Size_GB | 元数据网址 |
-|---------|-------|----------|-------------------|----------------|------------------|-----------|
-| PXD000001 | Sample title | Dr. Name | PRIDE | 150 | 25.68 | [点击] |
-| PXD000002 | Another study | Dr. Smith | MassIVE | 80 | 12.34 | [点击] |
+| 样品编号 | Title | lab head | Hosting Repository | Raw_File_Count | 元数据网址 |
+|---------|-------|----------|-------------------|----------------|-----------|
+| PXD000001 | Sample title | Dr. Name | PRIDE | 20 | [点击] |
+| PXD000002 | Another study | Dr. Smith | MassIVE | 15 | [点击] |
 
 ## 项目结构
 
@@ -112,7 +120,6 @@ scrap_tdp/
 ├── main.py                # 主程序入口
 ├── requirements.txt       # Python 依赖
 ├── README.md             # 项目说明
-├── .gitignore            # Git 忽略文件
 ├── scraper/              # 爬虫模块
 │   ├── __init__.py
 │   ├── px_scraper.py     # ProteomeXchange 搜索爬虫
@@ -135,13 +142,12 @@ scrap_tdp/
 
 ## 支持的仓库
 
-| 仓库 | API 支持 | 统计方式 |
-|------|---------|---------|
-| PRIDE | ✅ | `fileCategory=RAW` 过滤 |
-| MassIVE | ✅ | 文件后缀过滤 |
-| iProX | ✅ | 文件列表 API |
-| JPOST | ⚠️ | XML Fallback |
-| 其他 | ⚠️ | XML Fallback |
+| 仓库 | 文件获取方式 |
+|------|------------|
+| PRIDE | XML 文件列表 / PRIDE API |
+| MassIVE | MassIVE API |
+| JPOST | JPOST API |
+| iProX | XML 文件列表 |
 
 ## 常见问题
 
@@ -174,7 +180,7 @@ A: 日志保存在 `scraper.log` 文件中。
 - [ProteomeXchange 官网](https://www.proteomexchange.org/)
 - [ProteomeCentral](https://proteomecentral.proteomexchange.org/)
 - [PRIDE API 文档](https://www.ebi.ac.uk/pride/ws/archive/v2/)
-- [MassIVE API](https://massive.ucsd.edu/ProteoSAFe/static/proteosafe.jsp)
+- [MassIVE API](https://massive.ucsd.edu/ProteoSAFe/)
 
 ---
 

@@ -1,6 +1,6 @@
 """
 ProteomeXchange 爬虫主程序
-支持深度抓取：统计 PRIDE/MassIVE/iProX 等仓库的 RAW 文件数量和大小
+支持深度抓取：统计 PRIDE/MassIVE/iProX 等仓库的 RAW 文件数量
 """
 
 import argparse
@@ -39,7 +39,6 @@ OUTPUT_COLUMNS = [
     'Hosting Repository',
     # 新增的文件统计列（右侧）
     'Raw_File_Count',
-    'Total_Raw_Size_GB',
     # 最后一列：元数据链接
     '元数据网址'
 ]
@@ -100,7 +99,7 @@ def parse_arguments():
     parser.add_argument(
         '--skip-raw-count',
         action='store_true',
-        help='跳过 RAW 文件统计（快速模式，不获取文件数量和大小）'
+        help='跳过 RAW 文件统计（快速模式，不获取文件数量）'
     )
 
     parser.add_argument(
@@ -142,7 +141,6 @@ def merge_raw_file_stats(base_datasets: list, raw_stats: dict) -> list:
         # 创建合并后的数据
         merged = dataset.copy()
         merged['Raw_File_Count'] = stat.get('raw_file_count', 0)
-        merged['Total_Raw_Size_GB'] = stat.get('total_raw_size_gb', 0.0)
 
         # 如果有 repository 信息但原数据没有，补充进去
         if stat.get('repository') and stat['repository'] != 'Unknown':
@@ -228,7 +226,6 @@ def main():
             # 添加空列
             for dataset in final_datasets:
                 dataset['Raw_File_Count'] = 0
-                dataset['Total_Raw_Size_GB'] = 0.0
         else:
             logger.info(f"\n[第二步] 统计 RAW 文件（{args.workers} 线程并行）...")
 
@@ -245,10 +242,8 @@ def main():
 
             # 统计汇总
             total_files = sum(ds.get('Raw_File_Count', 0) for ds in final_datasets)
-            total_size = sum(ds.get('Total_Raw_Size_GB', 0.0) for ds in final_datasets)
             logger.info(f"RAW 文件统计完成:")
             logger.info(f"  - 总文件数: {total_files}")
-            logger.info(f"  - 总大小: {total_size:.2f} GB")
 
         # ========== 第三步：写入 Excel ==========
         logger.info(f"\n[第三步] 写入 Excel 文件...")
@@ -267,9 +262,7 @@ def main():
 
             if not args.skip_raw_count:
                 total_files = sum(ds.get('Raw_File_Count', 0) for ds in final_datasets)
-                total_size = sum(ds.get('Total_Raw_Size_GB', 0.0) for ds in final_datasets)
                 logger.info(f"✓ RAW 文件总数: {total_files}")
-                logger.info(f"✓ RAW 文件总大小: {total_size:.2f} GB")
 
             logger.info("=" * 70)
         else:

@@ -1,12 +1,18 @@
 """
 原始文件统计模块
-支持从 PRIDE, MassIVE, iProX 等仓库统计 RAW 文件数量和大小
+支持从 ProteomeXchange XML 和各仓库 API 统计 RAW 文件数量
+
+支持的原始文件格式：
+- .raw - Thermo 仪器
+- .d / .d.zip - TOF/Brucker 仪器
+- .wiff / .wiff2 - AB Sciex 仪器
 """
 
 import logging
 import xml.etree.ElementTree as ET
+import json
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from requests.adapters import HTTPAdapter
@@ -15,45 +21,32 @@ from urllib3.util.retry import Retry
 logger = logging.getLogger(__name__)
 
 
-# 支持的原始文件扩展名
+# 支持的原始文件扩展名（按长度排序，长的优先匹配）
 RAW_EXTENSIONS = [
-    '.raw', '.d', '.zip', '.wiff', '.wiff2', '.d.zip',
-    '.tar', '.gz', '.bz2', '.rar', '.7z',
-    '.mzml', '.mzxml', '.ms2', '.mgf', '.fid', '.yep', '.tdf'
+    '.raw.zip',      # 压缩的 Thermo RAW 文件
+    '.raw.gz',       # 压缩的 Thermo RAW 文件
+    '.raw',          # Thermo RAW 文件
+    '.d.zip',        # 压缩的 TOF/Brucker 文件
+    '.d.gz',         # 压缩的 TOF/Brucker 文件
+    '.d',            # TOF/Brucker 文件
+    '.wiff',         # AB Sciex WIFF
+    '.wiff2',        # AB Sciex WIFF2
 ]
 
 
-class RawFileCounter:
-    """原始文件统计器 - 支持多仓库"""
+def is_raw_file(filename: str) -> bool:
+    """判断文件是否是原始文件"""
+    filename_lower = filename.lower()
+    for ext in RAW_EXTENSIONS:
+        if filename_lower.endswith(ext):
+            return True
+    return False
 
-    # 仓库对应的配置
-    REPOSITORY_CONFIGS = {
-        'PRIDE': {
-            'api_base': 'https://www.ebi.ac.uk/pride/ws/archive/v2',
-            'files_endpoint': '/files'
-        },
-        'MassIVE': {
-            'api_base': 'https://massive.ucsd.edu/ProteoSAFe',
-            'dataset_json': '/datasets_json.jsp'
-        },
-        'iProX': {
-            'api_base': 'https://www.iprox.cn',
-            'api_endpoint': '/api/project/{accession}/files'
-        },
-        'ProteomeXchange': {
-            'api_base': 'https://proteomecentral.proteomexchange.org',
-            'xml_endpoint': '/cgi/GetDataset'
-        }
-    }
+
+class RawFileCounter:
+    """原始文件统计器"""
 
     def __init__(self, timeout: int = 30, max_retries: int = 3):
-        """
-        初始化统计器
-
-        Args:
-            timeout: 请求超时时间（秒）
-            max_retries: 最大重试次数
-        """
         self.timeout = timeout
         self.max_retries = max_retries
         self.session = self._create_session()
@@ -61,300 +54,233 @@ class RawFileCounter:
     def _create_session(self) -> requests.Session:
         """创建带重试机制的 Session"""
         session = requests.Session()
-
-        # 配置重试策略
         retry_strategy = Retry(
             total=self.max_retries,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"]
         )
-
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
-
         return session
 
-    def get_repository_from_xml(self, pxid: str) -> Optional[str]:
+    def _get_repository_and_links(self, pxid: str) -> Tuple[Optional[str], Dict[str, str]]:
         """
-        从 ProteomeXchange XML 获取 Hosting Repository
-
-        Args:
-            pxid: 数据集 ID (如 PXD000001)
+        从 XML 获取仓库类型和外部链接
 
         Returns:
-            仓库名称 (PRIDE, MassIVE, iProX 等) 或 None
+            (仓库名称, 链接字典)
         """
         url = f"https://proteomecentral.proteomexchange.org/cgi/GetDataset?ID={pxid}&outputMode=XML"
 
         try:
             response = self.session.get(url, timeout=self.timeout)
             response.raise_for_status()
-
             root = ET.fromstring(response.content)
 
-            # 查找 Repository 名称
-            # ProteomeXchange XML 格式: <Repository name="PRIDE" />
-            for repo in root.findall('.//Repository'):
-                repo_name = repo.get('name')
-                if repo_name:
-                    logger.debug(f"{pxid} -> Repository: {repo_name}")
-                    return repo_name
+            # 获取仓库
+            dataset_summary = root.find('.//DatasetSummary')
+            repository = None
+            if dataset_summary is not None:
+                repository = dataset_summary.get('hostingRepository')
 
-            # 备选：从 Announcement 中提取
-            for announcement in root.findall('.//Announcement'):
-                repo_text = announcement.text or ''
-                for repo in ['PRIDE', 'MassIVE', 'iProX', 'JPOST', 'PeptideAtlas']:
-                    if repo.lower() in repo_text.lower():
-                        logger.debug(f"{pxid} -> Repository (from announcement): {repo}")
-                        return repo
+            # 获取外部链接
+            links = {}
+            for full_link in root.findall('.//FullDatasetLink'):
+                for cv_param in full_link.findall('.//cvParam'):
+                    name = cv_param.get('name', '')
+                    value = cv_param.get('value', '')
+                    if value:
+                        links[name] = value
 
-            logger.warning(f"{pxid} 无法从 XML 中识别 Repository")
-            return None
+            return repository, links
 
         except Exception as e:
-            logger.error(f"获取 {pxid} Repository 信息失败: {e}")
-            return None
+            logger.error(f"获取 {pxid} XML 失败: {e}")
+            return None, {}
 
-    def count_pride_raw_files(self, pxid: str) -> Tuple[int, float]:
-        """
-        统计 PRIDE 仓库的 RAW 文件
-
-        Args:
-            pxid: 数据集 ID
-
-        Returns:
-            (文件数量, 总大小(字节))
-        """
-        api_url = f"{self.REPOSITORY_CONFIGS['PRIDE']['api_base']}/files"
+    def _count_from_jpost(self, jpost_id: str) -> int:
+        """从 JPOST API 获取文件数量"""
+        # JPOST ID 格式: JPST004334
+        url = f"https://repository.jpostdb.org/api/proteome/v1/jpost_files?dataset_id={jpost_id}"
 
         try:
-            # PRIDE API: 按 accession 查询文件
-            params = {
-                'accession': pxid,
-                'fileCategory': 'RAW'  # 只获取 RAW 文件
-            }
+            response = self.session.get(url, timeout=self.timeout)
+            if response.status_code == 200:
+                data = response.json()
+                files = data.get('data', data.get('files', []))
 
-            response = self.session.get(api_url, params=params, timeout=self.timeout)
-            response.raise_for_status()
+                count = 0
+                for file_info in files:
+                    file_name = file_info.get('path', file_info.get('name', ''))
+                    if is_raw_file(file_name):
+                        count += 1
 
-            data = response.json()
-
-            if not data or '_embedded' not in data:
-                return 0, 0.0
-
-            files = data['_embedded'].get('files', [])
-
-            total_size = sum(f.get('fileSizeBytes', 0) for f in files)
-
-            logger.debug(f"{pxid} (PRIDE): {len(files)} RAW 文件, {self._bytes_to_gb(total_size):.2f} GB")
-            return len(files), total_size
-
+                logger.debug(f"JPOST {jpost_id}: {count} RAW files")
+                return count
         except Exception as e:
-            logger.warning(f"{pxid} PRIDE API 请求失败: {e}")
-            return 0, 0.0
+            logger.debug(f"JPOST API 失败: {e}")
 
-    def count_massive_raw_files(self, pxid: str) -> Tuple[int, float]:
-        """
-        统计 MassIVE 仓库的 RAW 文件
+        return 0
 
-        Args:
-            pxid: 数据集 ID
-
-        Returns:
-            (文件数量, 总大小(字节))
-        """
-        # MassIVE 使用 MSV ID，但从 PXD 可以获取
-        url = f"{self.REPOSITORY_CONFIGS['MassIVE']['api_base']}{self.REPOSITORY_CONFIGS['MassIVE']['dataset_json']}"
+    def _count_from_massive(self, massive_id: str) -> int:
+        """从 MassIVE API 获取文件数量"""
+        # MassIVE ID 格式: MSV000097430
+        url = "https://massive.ucsd.edu/ProteoSAFe/QueryDatasets"
 
         try:
-            # 获取数据集信息
-            params = {'accession': pxid}
+            params = {'query': massive_id}
+            response = self.session.post(url, data=params, timeout=self.timeout)
 
+            if response.status_code == 200:
+                data = response.json()
+
+                # 尝试从 datasets_json.jsp 获取详细文件列表
+                task_id = data.get('row_data', [{}])[0].get('task', '')
+                if task_id:
+                    json_url = f"https://massive.ucsd.edu/ProteoSAFe/datasets_json.jsp?task={task_id}"
+                    json_response = self.session.get(json_url, timeout=self.timeout)
+
+                    if json_response.status_code == 200:
+                        json_data = json_response.json()
+                        files = json_data.get('files', json_data.get('dataset_files', []))
+
+                        count = 0
+                        for file_info in files:
+                            file_name = file_info.get('fileName', file_info.get('name', ''))
+                            if is_raw_file(file_name):
+                                count += 1
+
+                        logger.debug(f"MassIVE {massive_id}: {count} RAW files")
+                        return count
+        except Exception as e:
+            logger.debug(f"MassIVE API 失败: {e}")
+
+        return 0
+
+    def _count_from_pride_api(self, pxid: str) -> int:
+        """从 PRIDE API 获取 RAW 文件数量"""
+        url = "https://www.ebi.ac.uk/pride/ws/archive/v2/files"
+
+        try:
+            params = {'accession': pxid, 'fileCategory': 'RAW'}
             response = self.session.get(url, params=params, timeout=self.timeout)
-            response.raise_for_status()
 
-            data = response.json()
-
-            # 解析文件列表
-            files = data.get('files', [])
-
-            raw_count = 0
-            total_size = 0
-
-            for file_info in files:
-                file_name = file_info.get('fileName', '').lower()
-                file_size = file_info.get('fileSizeBytes', 0)
-
-                # 检查是否是原始文件
-                if any(file_name.endswith(ext.lower()) for ext in RAW_EXTENSIONS):
-                    raw_count += 1
-                    total_size += file_size
-
-            logger.debug(f"{pxid} (MassIVE): {raw_count} RAW 文件, {self._bytes_to_gb(total_size):.2f} GB")
-            return raw_count, total_size
-
+            if response.status_code == 200:
+                data = response.json()
+                if data and '_embedded' in data:
+                    files = data['_embedded'].get('files', [])
+                    logger.debug(f"PRIDE {pxid}: {len(files)} RAW files")
+                    return len(files)
         except Exception as e:
-            logger.warning(f"{pxid} MassIVE API 请求失败: {e}")
-            return 0, 0.0
+            logger.debug(f"PRIDE API 失败: {e}")
 
-    def count_iprox_raw_files(self, pxid: str) -> Tuple[int, float]:
+        return 0
+
+    def count_raw_files(self, pxid: str) -> Tuple[int, str]:
         """
-        统计 iProX 仓库的 RAW 文件
-
-        Args:
-            pxid: 数据集 ID
-
-        Returns:
-            (文件数量, 总大小(字节))
-        """
-        # iProX API 相对复杂，这里实现基础版本
-        url = f"https://www.iprox.cn/api/project/{pxid}/files"
-
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-
-            if response.status_code == 404:
-                # iProX 可能使用不同格式
-                return 0, 0.0
-
-            response.raise_for_status()
-            data = response.json()
-
-            files = data.get('data', data.get('files', []))
-
-            raw_count = 0
-            total_size = 0
-
-            for file_info in files:
-                file_name = file_info.get('name', file_info.get('fileName', '')).lower()
-                file_size = file_info.get('size', file_info.get('fileSize', 0))
-
-                if any(file_name.endswith(ext.lower()) for ext in RAW_EXTENSIONS):
-                    raw_count += 1
-                    total_size += file_size
-
-            logger.debug(f"{pxid} (iProX): {raw_count} RAW 文件, {self._bytes_to_gb(total_size):.2f} GB")
-            return raw_count, total_size
-
-        except Exception as e:
-            logger.warning(f"{pxid} iProX API 请求失败: {e}")
-            return 0, 0.0
-
-    def count_from_xml_fallback(self, pxid: str) -> Tuple[int, float]:
-        """
-        备用方案：从 ProteomeXchange XML 中提取 FTP 链接信息
-
-        Args:
-            pxid: 数据集 ID
-
-        Returns:
-            (文件数量, 估算大小)
-        """
-        url = f"https://proteomecentral.proteomexchange.org/cgi/GetDataset?ID={pxid}&outputMode=XML"
-
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-
-            root = ET.fromstring(response.content)
-
-            # 查找 FTP 链接
-            ftp_links = []
-            for link in root.findall('.//ftpLink'):
-                if link.text:
-                    ftp_links.append(link.text)
-
-            # 从 fullDatasetLink 中提取
-            for link in root.findall('.//fullDatasetLink'):
-                if link.text and 'ftp' in link.text.lower():
-                    ftp_links.append(link.text)
-
-            if ftp_links:
-                # 无法从 FTP 获取实际大小，返回链接数量作为估算
-                logger.debug(f"{pxid} (XML fallback): 找到 {len(ftp_links)} 个 FTP 链接")
-                return len(ftp_links), 0.0
-
-            return 0, 0.0
-
-        except Exception as e:
-            logger.warning(f"{pxid} XML fallback 失败: {e}")
-            return 0, 0.0
-
-    def count_raw_files(self, pxid: str, repository: str = None) -> Tuple[int, float]:
-        """
-        统计指定数据集的 RAW 文件数量和大小
+        统计指定数据集的 RAW 文件数量
 
         Args:
             pxid: 数据集 ID (如 PXD000001)
-            repository: 仓库名称 (如 PRIDE, MassIVE)。如果为 None，会自动检测
 
         Returns:
-            (文件数量, 总大小(GB))
+            (文件数量, 仓库名称)
         """
-        # 如果没有指定仓库，尝试从 XML 获取
-        if repository is None:
-            repository = self.get_repository_from_xml(pxid)
+        # 首先从 XML 获取仓库信息和链接
+        repository, links = self._get_repository_and_links(pxid)
 
         if not repository:
-            logger.warning(f"{pxid} 无法识别仓库，尝试备用方案")
-            count, size_bytes = self.count_from_xml_fallback(pxid)
-            return count, self._bytes_to_gb(size_bytes)
+            return 0, 'Unknown'
 
-        # 根据仓库类型调用相应的方法
+        # 首先尝试从 XML 的 DatasetFileList 获取（如果有）
+        xml_count = self._count_from_xml_datasetfilelist(pxid)
+        if xml_count > 0:
+            return xml_count, repository
+
+        # 根据仓库类型调用相应的 API
         repository_lower = repository.lower()
+        count = 0
 
         if 'pride' in repository_lower:
-            count, size_bytes = self.count_pride_raw_files(pxid)
+            count = self._count_from_pride_api(pxid)
 
-        elif 'massive' in repository_lower or 'msv' in repository_lower:
-            count, size_bytes = self.count_massive_raw_files(pxid)
+        elif 'jpost' in repository_lower:
+            # 从链接中提取 JPOST ID (如 JPST004334)
+            jpost_id = None
+            for name, value in links.items():
+                if 'jPOST dataset URI' in name or 'jPOST dataset identifier' in name:
+                    match = re.search(r'(JPST\d+)', value)
+                    if match:
+                        jpost_id = match.group(1)
+                        break
 
-        elif 'iprox' in repository_lower or 'pxd' in repository_lower:
-            count, size_bytes = self.count_iprox_raw_files(pxid)
+            if jpost_id:
+                count = self._count_from_jpost(jpost_id)
 
-        else:
-            logger.info(f"{pxid} 仓库 '{repository}' 暂不支持 API，使用 XML fallback")
-            count, size_bytes = self.count_from_xml_fallback(pxid)
+        elif 'massive' in repository_lower:
+            # 从链接中提取 MassIVE ID (如 MSV000097430)
+            massive_id = None
+            for name, value in links.items():
+                if 'MassIVE dataset identifier' in name:
+                    match = re.search(r'(MSV\d+)', value)
+                    if match:
+                        massive_id = match.group(1)
+                        break
+                # 也尝试从 FTP 链接提取
+                if 'FTP location' in name:
+                    match = re.search(r'(MSV\d+)', value)
+                    if match:
+                        massive_id = match.group(1)
+                        break
 
-        # 如果 API 方法失败，尝试备用方案
-        if count == 0:
-            logger.debug(f"{pxid} API 未获取到文件，尝试 XML fallback")
-            count, size_bytes = self.count_from_xml_fallback(pxid)
+            if massive_id:
+                count = self._count_from_massive(massive_id)
 
-        return count, self._bytes_to_gb(size_bytes)
+        elif 'iprox' in repository_lower:
+            # iProX 可能可以从 XML 读取，返回 0 表示暂不支持
+            count = 0
 
-    @staticmethod
-    def _bytes_to_gb(bytes_size: float) -> float:
-        """将字节转换为 GB"""
-        return bytes_size / (1024 ** 3)
+        logger.info(f"{pxid} ({repository}): {count} 个原始文件")
+        return count, repository
+
+    def _count_from_xml_datasetfilelist(self, pxid: str) -> int:
+        """从 XML 的 DatasetFileList 统计文件"""
+        url = f"https://proteomecentral.proteomexchange.org/cgi/GetDataset?ID={pxid}&outputMode=XML"
+
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+
+            file_count = 0
+            for dataset_file in root.findall('.//DatasetFile'):
+                file_name = dataset_file.get('name', '')
+                if is_raw_file(file_name):
+                    file_count += 1
+
+            if file_count > 0:
+                logger.debug(f"{pxid} XML: {file_count} RAW files")
+
+            return file_count
+
+        except Exception as e:
+            logger.debug(f"XML 解析失败: {e}")
+            return 0
 
 
 def count_raw_files_for_dataset(pxid: str) -> Dict[str, any]:
-    """
-    为单个数据集统计 RAW 文件（用于多线程）
-
-    Args:
-        pxid: 数据集 ID
-
-    Returns:
-        包含统计信息的字典
-    """
+    """为单个数据集统计 RAW 文件（用于多线程）"""
     counter = RawFileCounter()
 
     try:
-        # 获取仓库信息
-        repository = counter.get_repository_from_xml(pxid)
-
-        # 统计文件
-        count, size_gb = counter.count_raw_files(pxid, repository)
+        count, repository = counter.count_raw_files(pxid)
 
         return {
             'pxid': pxid,
-            'repository': repository or 'Unknown',
+            'repository': repository,
             'raw_file_count': count,
-            'total_raw_size_gb': round(size_gb, 2),
             'success': True
         }
 
@@ -364,23 +290,12 @@ def count_raw_files_for_dataset(pxid: str) -> Dict[str, any]:
             'pxid': pxid,
             'repository': 'Error',
             'raw_file_count': 0,
-            'total_raw_size_gb': 0.0,
-            'success': False,
-            'error': str(e)
+            'success': False
         }
 
 
 def count_raw_files_batch(pxid_list: list, max_workers: int = 5) -> Dict[str, Dict]:
-    """
-    批量统计多个数据集的 RAW 文件（多线程）
-
-    Args:
-        pxid_list: 数据集 ID 列表
-        max_workers: 最大线程数
-
-    Returns:
-        字典，键为 pxid，值为统计信息
-    """
+    """批量统计多个数据集的 RAW 文件（多线程）"""
     results = {}
 
     logger.info(f"开始批量统计 {len(pxid_list)} 个数据集的 RAW 文件...")
@@ -396,14 +311,12 @@ def count_raw_files_batch(pxid_list: list, max_workers: int = 5) -> Dict[str, Di
             try:
                 result = future.result()
                 results[pxid] = result
-                logger.info(f"  {pxid}: {result['raw_file_count']} 文件, {result['total_raw_size_gb']} GB")
+                logger.info(f"  {pxid}: {result['raw_file_count']} 个原始文件")
             except Exception as e:
                 logger.error(f"{pxid} 处理失败: {e}")
                 results[pxid] = {
                     'pxid': pxid,
-                    'raw_file_count': 0,
-                    'total_raw_size_gb': 0.0,
-                    'error': str(e)
+                    'raw_file_count': 0
                 }
 
     logger.info(f"批量统计完成: {len(results)} 个数据集")
